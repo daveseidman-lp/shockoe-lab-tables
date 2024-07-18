@@ -1,1 +1,7 @@
 .DS_STORE
+etc
+
+*.h5
+*.keras
+training-images/
+!training-images/.gitkeep

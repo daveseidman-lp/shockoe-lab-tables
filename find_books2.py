@@ -3,7 +3,8 @@ import numpy as np
 import cv2
 
 # start capturing video from the webcam
-cap = cv2.VideoCapture(0)
+video_path = "test1.mp4"
+cap = cv2.VideoCapture(video_path)
 
 if not cap.isOpened():
     print("Error: Could not open video stream from webcam.")
@@ -15,11 +16,12 @@ while True:
     
     if not ret:
         print("Error: Could not read frame from webcam.")
-        break
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        continue
     
     # convert the frame to grayscale and blur it
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (6, 6), 0)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
     
     # detect edges in the frame
     edged = cv2.Canny(gray, 10, 250)

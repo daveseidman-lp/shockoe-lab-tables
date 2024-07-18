@@ -1,1 +1,1 @@
-{"blur_x": 3, "blur_y": 2, "kernel_size": 9, "canny_lower": 7, "canny_upper": 92, "morph_type": 2, "approx_epsilon": 1, "brightness": 1, "contrast": 54}
+{"blur_x": 5, "blur_y": 5, "kernel_size": 2, "canny_lower": 38, "canny_upper": 287, "morph_type": 1, "approx_epsilon": 6, "brightness": 81, "contrast": 60, "max_disappeared": 5, "min_area": 3966}

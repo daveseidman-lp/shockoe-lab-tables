@@ -3,28 +3,122 @@ import cv2
 import json
 import os
 from collections import deque
+from scipy.spatial import distance
+import random
 
 # File to save and load settings
 settings_file = 'settings.json'
 
-# Buffer to store the last 3 frames for temporal smoothing
-frame_buffer = deque(maxlen=3)
+# Tracker data structures
+next_id = 0
+trackers = {}
+disappeared = {}
+max_disappeared = 3
+min_area = 3000  # Minimum area to consider a valid rectangle
 
 def update(x):
-    process_frame(current_frame.copy())
+    global max_disappeared, min_area
+    if current_frame is not None:
+        max_disappeared = cv2.getTrackbarPos('Max Disappeared', 'Settings')
+        min_area = cv2.getTrackbarPos('Min Area', 'Settings')
+        process_frame(current_frame.copy())
     save_settings()
 
-def process_frame(frame):
-    # Add the current frame to the buffer
-    frame_buffer.append(frame)
+def register(rect):
+    global next_id
+    color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    trackers[next_id] = (rect, color)
+    disappeared[next_id] = 0
+    next_id += 1
 
-    # Compute the weighted average frame if we have enough frames in the buffer
-    if len(frame_buffer) == frame_buffer.maxlen:
-        weights = np.array([0.1, 0.3, 0.6])
-        avg_frame = np.average(frame_buffer, axis=0, weights=weights).astype(np.uint8)
+def deregister(rect_id):
+    global next_id
+    del trackers[rect_id]
+    del disappeared[rect_id]
+    if not trackers:
+        next_id = 0
+
+def update_trackers(rects):
+    global trackers, disappeared
+
+    if len(rects) == 0:
+        for rect_id in list(disappeared.keys()):
+            disappeared[rect_id] += 1
+            if disappeared[rect_id] > max_disappeared:
+                deregister(rect_id)
+        return
+
+    input_centroids = []
+    for rect in rects:
+        if len(rect) == 4:
+            centroid_x = (rect[0][0][0] + rect[1][0][0] + rect[2][0][0] + rect[3][0][0]) // 4
+            centroid_y = (rect[0][0][1] + rect[1][0][1] + rect[2][0][1] + rect[3][0][1]) // 4
+            input_centroids.append((centroid_x, centroid_y))
+
+    input_centroids = np.array(input_centroids)
+
+    if len(trackers) == 0:
+        for rect in rects:
+            register(rect)
     else:
-        avg_frame = frame
+        object_ids = list(trackers.keys())
+        object_centroids = []
+        for rect, color in trackers.values():
+            centroid_x = (rect[0][0][0] + rect[1][0][0] + rect[2][0][0] + rect[3][0][0]) // 4
+            centroid_y = (rect[0][0][1] + rect[1][0][1] + rect[2][0][1] + rect[3][0][1]) // 4
+            object_centroids.append((centroid_x, centroid_y))
 
+        object_centroids = np.array(object_centroids)
+
+        D = distance.cdist(object_centroids, input_centroids)
+
+        rows = D.min(axis=1).argsort()
+        cols = D.argmin(axis=1)[rows]
+
+        used_rows = set()
+        used_cols = set()
+
+        for (row, col) in zip(rows, cols):
+            if row in used_rows or col in used_cols:
+                continue
+
+            object_id = object_ids[row]
+            trackers[object_id] = (rects[col], trackers[object_id][1])
+            disappeared[object_id] = 0
+
+            used_rows.add(row)
+            used_cols.add(col)
+
+        unused_rows = set(range(0, D.shape[0])).difference(used_rows)
+        unused_cols = set(range(0, D.shape[1])).difference(used_cols)
+
+        for row in unused_rows:
+            object_id = object_ids[row]
+            disappeared[object_id] += 1
+            if disappeared[object_id] > max_disappeared:
+                deregister(object_id)
+
+        for col in unused_cols:
+            register(rects[col])
+
+def is_valid_rectangle(quad):
+    if len(quad) != 4:
+        return False
+
+    def angle(p1, p2, p3):
+        a = np.array(p1)
+        b = np.array(p2)
+        c = np.array(p3)
+        ab = b - a
+        bc = c - b
+        cosine_angle = np.dot(ab, bc) / (np.linalg.norm(ab) * np.linalg.norm(bc))
+        angle = np.arccos(cosine_angle)
+        return np.degrees(angle)
+
+    angles = [angle(quad[i][0], quad[(i + 1) % 4][0], quad[(i + 2) % 4][0]) for i in range(4)]
+    return all(45 <= angle <= 135 for angle in angles)
+
+def process_frame(frame):
     # Get current positions of trackbars
     blur_x = cv2.getTrackbarPos('Blur X', 'Settings')
     blur_y = cv2.getTrackbarPos('Blur Y', 'Settings')
@@ -37,7 +131,7 @@ def process_frame(frame):
     contrast = cv2.getTrackbarPos('Contrast', 'Settings')
 
     # Apply brightness and contrast
-    avg_frame = cv2.convertScaleAbs(avg_frame, alpha=contrast/50, beta=brightness-50)
+    frame = cv2.convertScaleAbs(frame, alpha=contrast/50, beta=brightness-50)
 
     # Ensure kernel size and blur size are odd
     blur_x = blur_x * 2 + 1
@@ -45,7 +139,7 @@ def process_frame(frame):
     kernel_size = kernel_size * 2 + 1
 
     # Convert the frame to grayscale and blur it
-    gray = cv2.cvtColor(avg_frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (blur_x, blur_y), 0)
 
     # Detect edges in the frame
@@ -62,39 +156,48 @@ def process_frame(frame):
     # Find contours in the closed image
     contours, _ = cv2.findContours(closed.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    rects = []
+
     # Loop over the contours and label them
     for i, contour in enumerate(contours):
         # Approximate the contour
         peri = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, approx_epsilon * peri, True)
 
-        # Draw the contour and label it on the color image
-        if len(approx) == 4:
-            cv2.drawContours(closed_color, [approx], -1, (0, 255, 0), 3)  # Green for rectangles
+        # Calculate the area of the contour
+        area = cv2.contourArea(contour)
 
-            # Calculate homography matrix
-            src_pts = np.float32(approx).reshape(-1, 1, 2)
-            dst_pts = np.float32([[0, 0], [100, 0], [100, 100], [0, 100]]).reshape(-1, 1, 2)  # Reference rectangle
-            H, _ = cv2.findHomography(src_pts, dst_pts)
-
-            # Display the homography matrix
-            # print(f"Homography matrix for rectangle #{i+1}:")
-            # print(H)
+        # Draw the contour and label it on the color image if it meets the area and angle criteria
+        if len(approx) == 4 and area > min_area and is_valid_rectangle(approx):
+            rects.append(approx)
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+                for rect_id, (tracked_rect, color) in trackers.items():
+                    if np.array_equal(tracked_rect, approx):
+                        cv2.drawContours(closed_color, [approx], -1, color, 3)
+                        cv2.putText(closed_color, f"ID {rect_id}", (cX - 10, cY), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         else:
-            cv2.drawContours(closed_color, [approx], -1, (0, 0, 255), 1)  # Red for other shapes
-        
-        M = cv2.moments(contour)
-        if M["m00"] != 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-            cv2.putText(closed_color, f"#{i+1}", (cX - 10, cY), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            cv2.drawContours(closed_color, [approx], -1, (0, 0, 255), 1)  # Red for other shapes or small rectangles
+
+    # Update trackers
+    update_trackers(rects)
 
     # Add white padding around the images
-    avg_frame_padded = cv2.copyMakeBorder(avg_frame, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    frame_padded = cv2.copyMakeBorder(frame, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
     closed_color_padded = cv2.copyMakeBorder(closed_color, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
     # Concatenate original frame and closed_color side by side
-    combined = np.hstack((avg_frame_padded, closed_color_padded))
+    combined = np.hstack((frame_padded, closed_color_padded))
+
+    # Add text for tracked rectangles
+    y_offset = 50
+    for rect_id, (rect, color) in trackers.items():
+        area = cv2.contourArea(rect)
+        text = f"ID {rect_id}: Area {area:.2f}"
+        cv2.putText(combined, text, (frame_padded.shape[1] + 20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 1)
+        y_offset += 40
 
     # Display the combined image with contours and labels
     cv2.imshow("Combined Output", combined)
@@ -109,7 +212,9 @@ def save_settings():
         'morph_type': cv2.getTrackbarPos('Morph Type', 'Settings'),
         'approx_epsilon': cv2.getTrackbarPos('Approx Epsilon', 'Settings'),
         'brightness': cv2.getTrackbarPos('Brightness', 'Settings'),
-        'contrast': cv2.getTrackbarPos('Contrast', 'Settings')
+        'contrast': cv2.getTrackbarPos('Contrast', 'Settings'),
+        'max_disappeared': cv2.getTrackbarPos('Max Disappeared', 'Settings'),
+        'min_area': cv2.getTrackbarPos('Min Area', 'Settings')
     }
     with open(settings_file, 'w') as f:
         json.dump(settings, f)
@@ -127,11 +232,13 @@ def load_settings():
             cv2.setTrackbarPos('Approx Epsilon', 'Settings', settings.get('approx_epsilon', 2))
             cv2.setTrackbarPos('Brightness', 'Settings', settings.get('brightness', 50))
             cv2.setTrackbarPos('Contrast', 'Settings', settings.get('contrast', 50))
+            cv2.setTrackbarPos('Max Disappeared', 'Settings', settings.get('max_disappeared', 3))
+            cv2.setTrackbarPos('Min Area', 'Settings', settings.get('min_area', 3000))
 
 # Load the video file
 video_path = "test1.mp4"
-cap = cv2.VideoCapture(video_path)
-# cap = cv2.VideoCapture(0)
+# cap = cv2.VideoCapture(video_path)
+cap = cv2.VideoCapture(0)
 
 if not cap.isOpened():
     print("Error: Could not open video file.")
@@ -162,6 +269,10 @@ cv2.createTrackbar('Approx Epsilon', 'Settings', 2, 20, update)
 cv2.createTrackbar('Brightness', 'Settings', 50, 100, update)
 cv2.createTrackbar('Contrast', 'Settings', 50, 100, update)
 
+# Create trackbars for max disappeared and min area
+cv2.createTrackbar('Max Disappeared', 'Settings', 3, 20, update)
+cv2.createTrackbar('Min Area', 'Settings', 3000, 10000, update)
+
 # Load settings from file
 load_settings()
 
@@ -175,32 +286,32 @@ step = 0
 current_frame = None
 
 while True:
-    if not paused or step != 0:
-        ret, current_frame = cap.read()
-        if not ret:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, current_frame = cap.read()
+	ret, current_frame = cap.read()
+	if not paused or step != 0:
+			if not ret:
+					cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+					ret, current_frame = cap.read()
 
-        process_frame(current_frame)
+			process_frame(current_frame)
 
-        step = 0
+			step = 0
 
-    # Handle key events
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
-        break
-    elif key == ord('p'):
-        paused = not paused
-    elif key == ord('n'):
-        if paused:
-            step = 1
-    elif key == ord('b'):
-        if paused:
-            frame_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_pos - 2))
-            ret, current_frame = cap.read()
-            process_frame(current_frame)
-            step = 1
+	# Handle key events
+	key = cv2.waitKey(1) & 0xFF
+	if key == ord('q'):
+			break
+	elif key == ord('p'):
+			paused = not paused
+	elif key == ord('n'):
+			if paused:
+					step = 1
+	elif key == ord('b'):
+			if paused:
+					frame_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
+					cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_pos - 2))
+					ret, current_frame = cap.read()
+					process_frame(current_frame)
+					step = 1
 
 # Release the video file and close all OpenCV windows
 cap.release()

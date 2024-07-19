@@ -3,5 +3,8 @@ etc
 
 *.h5
 *.keras
-training-images/
+training-images
 !training-images/.gitkeep
+
+test-images
+!test-images/.gitkeep

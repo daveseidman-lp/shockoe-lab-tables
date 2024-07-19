@@ -6,8 +6,9 @@ import pathlib
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.models import Sequential
+import matplotlib.pyplot as plt
 
-data_dir = pathlib.Path('training-images')
+data_dir = pathlib.Path('training-images').with_suffix('')
 image_count = len(list(data_dir.glob('*/*.jpg')))
 print(image_count)
 
@@ -35,57 +36,89 @@ class_names = train_ds.class_names
 print(class_names)
 num_classes = len(class_names)
 
+plt.figure(figsize=(10, 10))
+for images, labels in train_ds.take(1):
+  for i in range(9):
+    ax = plt.subplot(3, 3, i + 1)
+    plt.imshow(images[i].numpy().astype("uint8"))
+    plt.title(class_names[labels[i]])
+    plt.axis("off")
+
 AUTOTUNE = tf.data.AUTOTUNE
 
 train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
 val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
-# Try to load the model
-try:
-    model = keras.models.load_model('object_detector1.keras')
-    print("Model loaded successfully.")
-except IOError:
-    print("Model not found. Training a new one.")
-    data_augmentation = keras.Sequential(
-      [
-        layers.RandomFlip("horizontal",
-          input_shape=(img_height,
-            img_width,
-            3)),
-        layers.RandomRotation(0.1),
-        layers.RandomZoom(0.1),
-      ]
-    )
+data_augmentation = keras.Sequential(
+  [
+    layers.RandomFlip("horizontal",
+      input_shape=(img_height,
+        img_width,
+        3)),
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.1),
+  ]
+)
 
-    model = Sequential([
-      layers.Input(shape=(img_height, img_width, 3)),
-      data_augmentation,
-      layers.Rescaling(1./255),
-      layers.Conv2D(16, 3, padding='same', activation='relu'),
-      layers.MaxPooling2D(),
-      layers.Conv2D(32, 3, padding='same', activation='relu'),
-      layers.MaxPooling2D(),
-      layers.Conv2D(64, 3, padding='same', activation='relu'),
-      layers.MaxPooling2D(),
-      layers.Dropout(0.2),
-      layers.Flatten(),
-      layers.Dense(128, activation='relu'),
-      layers.Dense(num_classes, name="outputs")
-    ])
+num_classes = len(class_names)
 
-    model.compile(optimizer='adam',
-                  loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-                  metrics=['accuracy'])
+model = Sequential([
+  layers.Input(shape=(img_height, img_width, 3)),  # Define the input shape here
+  data_augmentation,
+  layers.Rescaling(1./255),
+  layers.Conv2D(16, 3, padding='same', activation='relu'),
+  layers.MaxPooling2D(),
+  layers.Conv2D(32, 3, padding='same', activation='relu'),
+  layers.MaxPooling2D(),
+  layers.Conv2D(64, 3, padding='same', activation='relu'),
+  layers.MaxPooling2D(),
+  layers.Dropout(0.2),
+  layers.Flatten(),
+  layers.Dense(128, activation='relu'),
+  layers.Dense(num_classes, name="outputs")
+])
 
-    epochs = 15
-    model.fit(train_ds, validation_data=val_ds, epochs=epochs)
-    model.save('object_detector1.keras')
+model.compile(optimizer='adam',
+              loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              metrics=['accuracy'])
 
-# Prepare the image for prediction
-image_path = pathlib.Path('noise.jpg')
+epochs = 15
+history = model.fit(
+  train_ds,
+  validation_data=val_ds,
+  epochs=epochs
+)
+
+model.save('object_detector1.keras')
+
+# acc = history.history['accuracy']
+# val_acc = history.history['val_accuracy']
+
+# loss = history.history['loss']
+# val_loss = history.history['val_loss']
+
+# epochs_range = range(epochs)
+
+# plt.figure(figsize=(8, 8))
+# plt.subplot(1, 2, 1)
+# plt.plot(epochs_range, acc, label='Training Accuracy')
+# plt.plot(epochs_range, val_acc, label='Validation Accuracy')
+# plt.legend(loc='lower right')
+# plt.title('Training and Validation Accuracy')
+
+# plt.subplot(1, 2, 2)
+# plt.plot(epochs_range, loss, label='Training Loss')
+# plt.plot(epochs_range, val_loss, label='Validation Loss')
+# plt.legend(loc='upper right')
+# plt.title('Training and Validation Loss')
+# plt.show()
+
+
+image_path = pathlib.Path('museum.jpg')
+
 img = tf.keras.utils.load_img(image_path, target_size=(img_height, img_width))
 img_array = tf.keras.utils.img_to_array(img)
-img_array = tf.expand_dims(img_array, 0)  # Create a batch
+img_array = tf.expand_dims(img_array, 0) # Create a batch
 
 predictions = model.predict(img_array)
 score = tf.nn.softmax(predictions[0])
